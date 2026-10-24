@@ -1,0 +1,87 @@
+name: Run Flask + Ngrok (demo)
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+jobs:
+  run-and-expose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Upgrade pip and install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Start Flask app (background)
+        env:
+          PORT: 5000
+          HOST: 0.0.0.0
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AIRLY_API_KEY: ${{ secrets.AIRLY_API_KEY }}
+        run: |
+          # start app in background and capture logs
+          nohup python3 app.py --host 0.0.0.0 --port 5000 > server.log 2>&1 &
+          sleep 5
+          echo "=== server.log (first lines) ==="
+          head -n 200 server.log || true
+      
+      - name: Install jq (for parsing json)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+      
+      - name: Install latest ngrok
+        run: |
+          # Official ngrok installation method
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt update && sudo apt install ngrok
+          
+          # Verify installation
+          ngrok version
+      
+      - name: Configure ngrok (requires secret NGROK_AUTH_TOKEN)
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          if [ -z "$NGROK_AUTH_TOKEN" ]; then
+            echo "NGROK_AUTH_TOKEN is not set; aborting"
+            exit 1
+          fi
+          ngrok authtoken $NGROK_AUTH_TOKEN
+      
+      - name: Start ngrok and print public URL
+        run: |
+          # start ngrok pointing to the port
+          ngrok http 5000 --log=stdout > ngrok.log 2>&1 &
+          sleep 8
+          echo "=== ngrok log ==="
+          tail -n 200 ngrok.log || true
+          
+          # query local API for tunnel info
+          TUNNELS_JSON=$(curl --silent http://127.0.0.1:4040/api/tunnels || true)
+          echo "TUNNELS_JSON: $TUNNELS_JSON"
+          
+          PUBLIC_URL=$(echo "$TUNNELS_JSON" | jq -r '.tunnels[0].public_url // empty')
+          if [ -z "$PUBLIC_URL" ]; then
+            echo "Could not find public URL - check ngrok logs above"
+            exit 1
+          fi
+          
+          echo "==== YOUR DEMO URL (valid while workflow runs) ===="
+          echo "$PUBLIC_URL"
+          echo "================================================="
+          
+          # Keep the workflow running to maintain the tunnel
+          echo "Keeping tunnel alive for demo purposes..."
+          sleep 7200  # Keep alive for 2 hours (adjust as needed)

@@ -1,0 +1,30 @@
+# Secrets - never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+env/
+venv/
+.venv/
+
+# Generated data and outputs
+data/
+visualizations/
+static/
+*.log
+server.log
+ngrok.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# OSMnx download cache
+cache/
