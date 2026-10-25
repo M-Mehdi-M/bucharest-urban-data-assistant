@@ -1,8 +1,5 @@
 name: Run Flask + Ngrok (demo)
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 jobs:
   run-and-expose:
@@ -15,7 +12,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.12'
       
       - name: Upgrade pip and install dependencies
         run: |
@@ -30,7 +27,7 @@ jobs:
           AIRLY_API_KEY: ${{ secrets.AIRLY_API_KEY }}
         run: |
           # start app in background and capture logs
-          nohup python3 app.py --host 0.0.0.0 --port 5000 > server.log 2>&1 &
+          nohup waitress-serve --call --host=0.0.0.0 --port=5000 app:create_app > server.log 2>&1 &
           sleep 5
           echo "=== server.log (first lines) ==="
           head -n 200 server.log || true

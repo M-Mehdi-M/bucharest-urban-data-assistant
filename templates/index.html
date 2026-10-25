@@ -1,460 +1,56 @@
-<!DOCTYPE html>
+﻿<!doctype html>
 <html lang="ro">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Asistent Date Urbane București</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-    <style>
-        body { padding-top: 20px; }
-        #map-container { height: 500px; width: 100%; }
-        #chat-container { height: 450px; max-height: 450px; overflow-y: auto; }
-        .chat-message { margin-bottom: 15px; padding: 10px; border-radius: 10px; }
-        .user-message { background-color: #e9f5e9; text-align: right; }
-        .assistant-message { background-color: #f0f0f0; }
-        #loading { display: none; }
-        .status-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 8px;
-        }
-        .status-ok { background-color: #28a745; }
-        .status-updating { background-color: #ffc107; }
-        .status-error { background-color: #dc3545; }
-        /* Make chat card match map height */
-        .col-md-4 .card {
-            height: 500px;
-        }
-        .col-md-4 .card-body {
-            height: calc(100% - 60px);
-            min-height: unset !important;
-            max-height: unset !important;
-        }
-        /* Visualization container styles */
-        #visualization-container {
-            margin-top: 30px;
-            margin-bottom: 30px;
-        }
-        #visualization-image {
-            max-width: 100%; 
-            height: auto; 
-            border-radius: 8px; 
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            transition: transform 0.3s ease;
-        }
-        #visualization-image:hover {
-            transform: scale(1.02);
-        }
-    </style>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Explorează parcurile Bucureștiului, compară datele disponibile și planifică o vizită cu surse la vedere.">
+<title>Verde București · Asistent urban</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
-<body>
-    <div class="container">
-        <header class="d-flex flex-wrap justify-content-between align-items-center mb-4 border-bottom pb-3">
-            <h1>🌳 Asistent Date Urbane București 🏙️</h1>
-            <div class="text-end">
-                <small class="text-muted d-block">
-                    {% if is_updating %}
-                    <span class="status-indicator status-updating"></span>
-                    <span>Actualizare date...</span>
-                    {% else %}
-                    <span class="status-indicator status-ok"></span>
-                    <span>Date pregătite</span>
-                    {% endif %}
-                </small>
-                <small class="text-muted d-block">Ultima actualizare: {{ last_update }}</small>
-                <button id="update-data-btn" class="btn btn-sm btn-outline-secondary mt-1">
-                    Actualizează Datele
-                </button>
-            </div>
-        </header>
-        
-        <div class="row">
-            <div class="col-md-8">
-                <div id="map-container" class="border rounded">
-                    {% if map_file %}
-                    <iframe src="/maps/{{ map_file }}" width="100%" height="100%" frameborder="0"></iframe>
-                    {% else %}
-                    <div class="d-flex align-items-center justify-content-center h-100">
-                        <div class="text-center">
-                            <div class="spinner-border text-primary" role="status">
-                                <span class="visually-hidden">Se încarcă...</span>
-                            </div>
-                            <p class="mt-2">Se încarcă datele hărții...</p>
-                        </div>
-                    </div>
-                    {% endif %}
-                </div>
-                
-                <div class="mt-3">
-                    <h4>Statistici</h4>
-                    <div class="row">
-                        <div class="col-md-4">
-                            <div class="card h-100">
-                                <div class="card-body">
-                                    <h5 class="card-title">Parcuri pe Sectoare</h5>
-                                    <ul class="list-group list-group-flush">
-                                        {% for sector in sectors %}
-                                        <li class="list-group-item d-flex justify-content-between align-items-center px-0">
-                                            {{ sector.name }}
-                                            <span class="badge bg-success rounded-pill">{{ sector.count }}</span>
-                                        </li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card h-100">
-                                <div class="card-body text-center">
-                                    <h5 class="card-title">Total Parcuri</h5>
-                                    <p class="card-text display-4 text-success fw-bold">{{ parks_count }}</p>
-                                    <small class="text-muted">Spații verzi active</small>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card h-100">
-                                <div class="card-body">
-                                    <h5 class="card-title">Statistici Rapide</h5>
-                                    <div class="d-flex flex-column gap-2">
-                                        <div class="d-flex justify-content-between">
-                                            <span>Media pe Sector:</span>
-                                            <strong class="text-success">{{ (parks_count / 6)|round|int }}</strong>
-                                        </div>
-                                        <div class="d-flex justify-content-between">
-                                            <span>Cele mai multe parcuri:</span>
-                                            <strong class="text-success">Sectorul 2</strong>
-                                        </div>
-                                        <div class="d-flex justify-content-between">
-                                            <span>Cele mai puține parcuri:</span>
-                                            <strong class="text-warning">Sectorul 4</strong>
-                                        </div>
-                                        <div class="d-flex justify-content-between">
-                                            <span>Acoperire:</span>
-                                            <strong class="text-info">La nivelul orașului</strong>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-4">
-                <div class="card">
-                    <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-                        <span>Chat cu Asistentul Urban</span>
-                        <button id="help-btn" class="btn btn-sm btn-outline-light">
-                            Ajutor
-                        </button>
-                    </div>
-                    <div class="card-body d-flex flex-column">
-                        <div id="chat-container" class="flex-grow-1">
-                            <div class="chat-message assistant-message">
-                                Bună! Te pot ajuta cu informații despre parcuri, calitatea aerului și date urbane din București. Ce dorești să afli?
-                            </div>
-                        </div>
-                        <div>
-                            <form id="chat-form" class="mt-3">
-                                <div class="input-group">
-                                    <input type="text" class="form-control" id="user-input" placeholder="Adresează o întrebare...">
-                                    <button class="btn btn-success" type="submit">Trimite</button>
-                                </div>
-                            </form>
-                            <div id="loading" class="mt-2 text-center">
-                                <div class="spinner-border text-success" role="status">
-                                    <span class="visually-hidden">Se încarcă...</span>
-                                </div>
-                                <p class="text-muted">Se gândește...</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Visualization Container -->
-        <div class="row mt-4">
-            <div class="col-12">
-                <div id="visualization-container" style="display: none;">
-                    <div class="card">
-                        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-                            <span>Vizualizare generată</span>
-                            <div>
-                                <button id="download-vis-btn" class="btn btn-sm btn-outline-light me-2">
-                                    Descarcă
-                                </button>
-                                <button id="close-vis-btn" class="btn btn-sm btn-outline-light">
-                                    <i class="fas fa-times"></i> Închide
-                                </button>
-                            </div>
-                        </div>
-                        <div class="card-body text-center" style="max-height: 600px; overflow: auto;">
-                            <img id="visualization-image" src="" alt="Vizualizare generată" style="max-width: 100%; height: auto;">
-                            <iframe id="visualization-frame" src="" style="display: none; width: 100%; height: 520px; border: 0;"></iframe>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <footer class="mt-4 pt-3 border-top text-muted">
-            <p class="text-center">
-                <small>
-                    Asistent Date Urbane București - Un instrument de analiză geospațială folosind LangGraph, Gemini și biblioteci GIS Python
-                </small>
-            </p>
-        </footer>
-    </div>
-    
-    <!-- Help Modal -->
-    <div class="modal fade" id="helpModal" tabindex="-1" aria-labelledby="helpModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="helpModalLabel">Exemple de Întrebări</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <p>Poți adresa întrebări despre mediul urban din București, cum ar fi:</p>
-                    <ul>
-                        <li>Care sector are cele mai multe parcuri?</li>
-                        <li>Care sunt parcurile cu cea mai bună calitate a aerului?</li>
-                        <li>Găsește un traseu între Parcul Herăstrău și Grădina Cișmigiu</li>
-                        <li>Unde ar fi bune locații pentru parcuri noi?</li>
-                        <li>Creează un grafic comparând sectoarele după numărul de parcuri</li>
-                        <li>Arată-mi harta de căldură pentru calitatea aerului</li>
-                        <li>Caută parcuri care conțin 'Tineretului'</li>
-                    </ul>
-                    <p>Click pe orice exemplu pentru a-l folosi:</p>
-                    <div class="list-group">
-                        <button class="list-group-item list-group-item-action example-question">Care sector are cele mai multe parcuri?</button>
-                        <button class="list-group-item list-group-item-action example-question">Care sunt top 3 parcuri cu cea mai bună calitate a aerului?</button>
-                        <button class="list-group-item list-group-item-action example-question">Creează un grafic comparând sectoarele după numărul de parcuri</button>
-                        <button class="list-group-item list-group-item-action example-question">Unde ar fi bune locații pentru parcuri noi?</button>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Închide</button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const chatForm = document.getElementById('chat-form');
-            const userInput = document.getElementById('user-input');
-            const chatContainer = document.getElementById('chat-container');
-            const loading = document.getElementById('loading');
-            const helpBtn = document.getElementById('help-btn');
-            const updateDataBtn = document.getElementById('update-data-btn');
-            
-            // Function to scroll chat to bottom
-            function scrollChatToBottom() {
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-            }
-            
-            // Initialize modal
-            const helpModal = new bootstrap.Modal(document.getElementById('helpModal'));
-            
-            // Help button click
-            helpBtn.addEventListener('click', function() {
-                helpModal.show();
-            });
-            
-            // Update data button click
-            updateDataBtn.addEventListener('click', function() {
-                if (confirm('Ești sigur că dorești să actualizezi toate datele? Acest proces poate dura câteva minute.')) {
-                    updateDataBtn.disabled = true;
-                    updateDataBtn.innerHTML = 'Se actualizează...';
-                    
-                    fetch('/update-data', {
-                        method: 'POST',
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message);
-                        setTimeout(() => {
-                            window.location.reload();
-                        }, 5000);
-                    })
-                    .catch(error => {
-                        console.error('Error:', error);
-                        alert('Eroare la actualizarea datelor: ' + error);
-                        updateDataBtn.disabled = false;
-                        updateDataBtn.innerHTML = 'Actualizează Datele';
-                    });
-                }
-            });
-            
-            // Example question click
-            document.querySelectorAll('.example-question').forEach(button => {
-                button.addEventListener('click', function() {
-                    userInput.value = this.textContent;
-                    helpModal.hide();
-                    setTimeout(() => {
-                        chatForm.dispatchEvent(new Event('submit'));
-                    }, 300);
-                });
-            });
-            
-            // Show text safely: escape HTML first, then allow only line breaks and **bold**
-            function formatMessage(text) {
-                const escaped = String(text)
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-                return escaped
-                    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-                    .replace(/\n/g, '<br>');
-            }
-
-            // Form submit handler
-            chatForm.addEventListener('submit', function(e) {
-                e.preventDefault();
-                
-                const query = userInput.value.trim();
-                if (!query) return;
-                
-                // Add user message to chat
-                const userDiv = document.createElement('div');
-                userDiv.classList.add('chat-message', 'user-message');
-                userDiv.textContent = query;
-                chatContainer.appendChild(userDiv);
-                
-                // Clear input and scroll to bottom
-                userInput.value = '';
-                scrollChatToBottom();
-                
-                // Show loading indicator
-                loading.style.display = 'block';
-                
-                // Hide the visualization container while loading
-                document.getElementById('visualization-container').style.display = 'none';
-                
-                // Send to API
-                fetch('/api/query', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({query: query}),
-                })
-                .then(response => {
-                    return response.json().catch(() => ({})).then(body => {
-                        if (!response.ok) {
-                            throw new Error(body.error || `Eroare HTTP ${response.status}`);
-                        }
-                        return body;
-                    });
-                })
-                .then(data => {
-                    // Hide loading
-                    loading.style.display = 'none';
-                    
-                    // Add assistant response
-                    const assistantDiv = document.createElement('div');
-                    assistantDiv.classList.add('chat-message', 'assistant-message');
-                    
-                    // Clean the response by removing direct file paths to visualizations
-                    let cleanedResponse = data.response;
-                    
-                    // Remove specific visualization file paths from the response
-                    cleanedResponse = cleanedResponse.replace(
-                        /la adresa\s+[\'\"](visualizations|\/visualizations)\\?\/?\w+\.(png|jpg|jpeg|html)[\'\"]/gi, 
-                        "în secțiunea de vizualizări de mai jos"
-                    );
-                    
-                    // More general pattern to catch other references to visualization paths
-                    cleanedResponse = cleanedResponse.replace(
-                        /(saved at|saved to|created at|creat la|salvat la):\s+[\'\"](visualizations|\/visualizations)\\?\/?\w+\.(png|jpg|jpeg|html)[\'\"]/gi,
-                        "$1: în secțiunea de vizualizări de mai jos"
-                    );
-                    
-                    // Clean any remaining full paths to visualizations
-                    cleanedResponse = cleanedResponse.replace(
-                        /(visualizations|\/visualizations)\\?\/?\w+\.(png|jpg|jpeg|html)/gi,
-                        "secțiunea de vizualizări"
-                    );
-                    
-                    assistantDiv.innerHTML = formatMessage(cleanedResponse);
-                    chatContainer.appendChild(assistantDiv);
-                    
-                    // Always scroll to bottom of chat after response
-                    scrollChatToBottom();
-                    
-                    // Handle visualization if available
-                    const visualizationContainer = document.getElementById('visualization-container');
-                    const visualizationImage = document.getElementById('visualization-image');
-                    const downloadBtn = document.getElementById('download-vis-btn');
-                    const closeBtn = document.getElementById('close-vis-btn');
-                    
-                    if (data.visualization) {
-                        // Interactive maps (.html) go in an iframe, charts (.png) in an image
-                        const isMap = data.visualization.toLowerCase().endsWith('.html');
-                        const visualizationFrame = document.getElementById('visualization-frame');
-                        visualizationImage.style.display = isMap ? 'none' : 'inline';
-                        visualizationFrame.style.display = isMap ? 'block' : 'none';
-                        if (isMap) {
-                            visualizationFrame.src = data.visualization;
-                        } else {
-                            visualizationImage.src = data.visualization;
-                        }
-                        
-                        // Show the visualization container
-                        visualizationContainer.style.display = 'block';
-                        
-                        // Setup download button
-                        downloadBtn.onclick = function() {
-                            const a = document.createElement('a');
-                            a.href = data.visualization;
-                            a.download = data.visualization.split('/').pop();
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                        };
-                        
-                        // Setup close button
-                        closeBtn.onclick = function() {
-                            visualizationContainer.style.display = 'none';
-                        };
-                        
-                        // No auto-scrolling to visualization - removed as requested
-                    } else {
-                        // Hide the visualization container if no visualization
-                        visualizationContainer.style.display = 'none';
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    loading.style.display = 'none';
-                    
-                    const errorDiv = document.createElement('div');
-                    errorDiv.classList.add('chat-message', 'assistant-message', 'text-danger');
-                    errorDiv.textContent = `Îmi pare rău, a apărut o eroare: ${error.message}. Te rog încearcă din nou.`;
-                    chatContainer.appendChild(errorDiv);
-                    
-                    scrollChatToBottom();
-                });
-            });
-            
-            // Setup close button event handler on page load too
-            const closeBtn = document.getElementById('close-vis-btn');
-            if (closeBtn) {
-                closeBtn.onclick = function() {
-                    document.getElementById('visualization-container').style.display = 'none';
-                };
-            }
-            
-            // Auto-scroll to bottom of chat on page load
-            scrollChatToBottom();
-        });
-    </script>
-</body>
-</html>
+<body data-ready="{{ 'true' if ready else 'false' }}">
+<main class="shell">
+<header>
+<div><div class="brand"><img src="{{ url_for('static', filename='favicon.svg') }}" width="40" height="40" alt="">Verde București <span class="muted">/ Asistent urban</span></div>
+<h1>Mai aproape de un parc potrivit.</h1><p class="subtitle">Explorează spațiile verzi, compară datele disponibile și planifică o vizită. Cu surse la vedere și limite explicite.</p></div>
+<div class="status-area"><span class="status" id="data-status" role="status">{{ 'Date disponibile' if ready else 'Se pregătesc datele' }}</span><small class="muted" id="last-update">{{ last_update }}</small><br><button class="button" id="update-data-btn" type="button">Actualizează datele</button></div>
+</header>
+<div class="notice" id="service-notice" role="status" {% if not error_message %}hidden{% endif %}>{{ error_message or '' }}</div>
+{% if simulation %}<div class="notice"><strong>Mod demonstrație.</strong> Traficul și zgomotul sunt simulate, nu măsurători reale.</div>{% endif %}
+<section class="source-grid" id="source-status" aria-label="Starea surselor de date" aria-live="polite"></section>
+<section class="stats" aria-label="Date pe scurt">
+<div class="stat"><span>Parcuri în setul de date</span><strong id="parks-count">{{ parks_count }}</strong></div>
+<div class="stat"><span>Cele mai multe înregistrări</span><strong id="largest-sector">{{ sectors[0].name if sectors else 'În așteptare' }}</strong></div>
+<div class="stat"><span>Tipul datelor</span><strong>{{ 'Demonstrație' if simulation else 'Surse publice' }}</strong></div>
+</section>
+<div class="workspace">
+<section class="panel" aria-labelledby="map-title">
+<div class="panel-heading"><div><span class="eyebrow">Explorează orașul</span><h2 id="map-title">Parcurile Bucureștiului</h2></div><span class="muted">OpenStreetMap</span></div>
+<div id="map-container">
+{% if map_file %}<iframe id="parks-map" src="/maps/{{ map_file }}" title="Hartă interactivă a parcurilor Bucureștiului"></iframe>
+{% else %}<div class="empty-map" id="map-placeholder"><strong>Pregătim harta.</strong><p>Datele apar automat când sunt disponibile.</p></div><iframe id="parks-map" title="Hartă interactivă a parcurilor Bucureștiului" hidden></iframe>{% endif %}
+</div>
+<div class="map-caption">Culorile compară valorile disponibile între parcuri; gri înseamnă date lipsă. Senzorii din apropiere nu măsoară condițiile exacte din parc.</div>
+<div class="sector-list" id="sector-list" aria-label="Parcuri pe sectoare">{% for sector in sectors %}<span class="sector">{{ sector.name }} <b>{{ sector.count }}</b></span>{% endfor %}</div>
+</section>
+<section class="panel chat-panel" aria-labelledby="chat-title">
+<div class="panel-heading"><div><span class="eyebrow">Întreabă, compară, descoperă</span><h2 id="chat-title">Asistentul tău urban</h2></div><button class="button" id="clear-chat" type="button">Reîncepe</button></div>
+<div id="chat-container" role="log" aria-live="polite" aria-relevant="additions"><div class="message assistant"><span class="message-label">Asistent</span>Bună! Putem explora parcurile, compara datele de aer disponibile sau găsi un traseu pe jos. Ce ai vrea să descoperi?</div></div>
+<div class="examples" aria-label="Întrebări de încercat">
+<button class="example" data-query="Recomandă-mi un parc pe baza măsurătorilor recente de aer.">Alege un parc</button>
+<button class="example" data-query="Planifică un traseu pe jos de la Parcul Izvor la Parcul Cișmigiu.">Traseu pe jos</button>
+<button class="example" data-query="Cum va fi vremea mâine pentru o plimbare în parc?">Vremea de mâine</button>
+</div>
+<div id="loading" role="status" hidden>Analizez datele disponibile…</div>
+<form class="composer" id="chat-form"><label for="user-input" class="sr-only">Întrebarea ta despre București</label>
+<div class="input-row"><input id="user-input" name="query" maxlength="500" autocomplete="off" placeholder="Ce ai vrea să afli?" required><button class="button primary" id="send-button" type="submit" {% if not ready %}disabled{% endif %}>Trimite</button></div>
+<small id="input-hint">{{ 'Datele se pregătesc; poți scrie deja întrebarea.' if not ready else 'Verifică sursele și ora observațiilor fiecărei recomandări.' }}</small></form>
+</section>
+</div>
+<section class="panel artifact" id="visualization-container" aria-labelledby="artifact-title" hidden>
+<div class="panel-heading"><h2 id="artifact-title">Rezultatul analizei</h2><div><a class="button" id="download-vis" download>Descarcă</a> <button class="button" id="close-vis" type="button">Închide</button></div></div>
+<div class="artifact-body"><iframe id="visualization-frame" title="Harta rezultatului analizei" hidden></iframe><img id="visualization-image" alt="Graficul rezultatului analizei" hidden></div>
+</section>
+<footer class="footer"><span>Date: OpenStreetMap contributors · Airly · Open-Meteo</span><span>Estimările geometrice nu sunt distanțe de mers. Datele lipsă rămân necunoscute.</span></footer>
+</main>
+</body></html>

@@ -39,29 +39,27 @@ class SpatialAnalyst:
         
         This property retrieves the administrative boundary of Bucharest
         from OpenStreetMap the first time it's accessed, then caches it
-        for future use to improve performance. If retrieval fails, it
-        creates a simple bounding box as a fallback.
+        for future use to improve performance. An unavailable boundary is
+        reported explicitly rather than replaced by an invented polygon.
         
         Returns:
             GeoDataFrame containing Bucharest's boundary polygon
         """
         if self._cached_bucharest_boundary is None:
             try:
-                # Get Bucharest boundary using OSMnx's geocoding functionality
-                self._cached_bucharest_boundary = ox.geocode_to_gdf("București, Romania")
+                # Reuse verified sector boundaries when available, including offline.
+                from pathlib import Path
+                if Path(config.CITY_BOUNDARY_FILE).exists():
+                    self._cached_bucharest_boundary = gpd.read_file(config.CITY_BOUNDARY_FILE)
+                elif Path(config.SECTORS_FILE).exists():
+                    sectors = gpd.read_file(config.SECTORS_FILE)
+                    self._cached_bucharest_boundary = sectors.dissolve()
+                else:
+                    from .osm_source import city_boundary
+                    self._cached_bucharest_boundary = city_boundary()
             except Exception as e:
                 print(f"Could not fetch Bucharest boundary: {e}")
-                # Create a simple bounding box as fallback using configured coordinates
-                bbox = config.BUCHAREST_BBOX
-                self._cached_bucharest_boundary = gpd.GeoDataFrame(
-                    geometry=[Polygon([
-                        (bbox['west'], bbox['south']),
-                        (bbox['east'], bbox['south']),
-                        (bbox['east'], bbox['north']),
-                        (bbox['west'], bbox['north'])
-                    ])],
-                    crs="EPSG:4326"
-                )
+                raise ValueError("Limita administrativă a Bucureștiului nu este disponibilă.") from e
         return self._cached_bucharest_boundary
     
     @property
@@ -82,16 +80,16 @@ class SpatialAnalyst:
                 # Get drivable road network for Bucharest using OSMnx
                 self._cached_road_network = ox.graph_from_place(
                     "București, Romania", 
-                    network_type="drive"
+                    network_type="walk"
                 )
             except Exception as e:
                 print(f"Could not fetch Bucharest road network: {e}")
                 self._cached_road_network = nx.Graph()  # Empty graph as fallback
         return self._cached_road_network
     
-    def calculate_park_accessibility(self, distance_m=500):
+    def calculate_park_accessibility(self, distance_m=500, region=None):
         """
-        Calculate accessibility of parks based on walking distance.
+        Estimate geometric coverage around parks, not pedestrian travel distance.
         
         This method identifies areas of the city that are within a specified
         walking distance of any park. It creates buffers around each park,
@@ -117,9 +115,18 @@ class SpatialAnalyst:
         
         try:
             # Project to a meter-based CRS for accurate buffer measurements
-            # EPSG:3857 is Web Mercator, which preserves distances in central latitudes
-            parks_proj = self.data.to_crs("EPSG:3857")
-            city_proj = self.bucharest_boundary.to_crs("EPSG:3857")
+            # UTM 35N is suitable for local distance and area measurement.
+            parks_proj = self.data.to_crs(config.METRIC_CRS)
+            city_proj = self.bucharest_boundary.to_crs(config.METRIC_CRS)
+            if region:
+                import re
+                match = re.search(r'[1-6]', str(region))
+                if not match or not __import__('os').path.exists(config.SECTORS_FILE):
+                    raise ValueError('Limita administrativă verificată a sectorului nu este disponibilă.')
+                sectors = gpd.read_file(config.SECTORS_FILE)
+                city_proj = sectors[sectors.sector == f'Sector {match.group()}'].to_crs(config.METRIC_CRS)
+                if city_proj.empty:
+                    raise ValueError('Limita sectorului nu este disponibilă.')
             
             # Create circular buffers around parks representing walking distance
             parks_proj['buffer'] = parks_proj.geometry.buffer(distance_m)
@@ -146,7 +153,7 @@ class SpatialAnalyst:
             # Create GeoDataFrame for visualization of accessible areas
             gdf_accessible = gpd.GeoDataFrame(
                 geometry=[accessible_area],
-                crs="EPSG:3857"
+                crs=config.METRIC_CRS
             ).to_crs("EPSG:4326")  # Convert back to WGS84 for standard representation
             
             return {
@@ -200,8 +207,8 @@ class SpatialAnalyst:
                 )
             
             # Project to a meter-based CRS for accurate spatial operations
-            city_proj = self.bucharest_boundary.to_crs("EPSG:3857")
-            accessible_area = accessibility["gdf_accessible"].to_crs("EPSG:3857").unary_union
+            city_proj = self.bucharest_boundary.to_crs(config.METRIC_CRS)
+            accessible_area = accessibility["gdf_accessible"].to_crs(config.METRIC_CRS).unary_union
             
             # Find areas not currently served by parks (the "gap areas")
             # This uses the difference operation: city area minus accessible areas
@@ -241,9 +248,9 @@ class SpatialAnalyst:
             # Higher score = better location for a new park
             results = []
             
+            parks_proj = self.data.to_crs(config.METRIC_CRS)
             for point in candidate_points:
                 # Measure distance to existing parks (farther is better)
-                parks_proj = self.data.to_crs("EPSG:3857")
                 min_distance_to_park = min(parks_proj.geometry.distance(point))
                 
                 # Calculate potential population served by creating a buffer and
@@ -254,7 +261,7 @@ class SpatialAnalyst:
                 # Calculate score using a weighted combination of factors
                 # 30% weight on distance from existing parks
                 # 70% weight on amount of underserved area covered
-                score = (min_distance_to_park * 0.3) + (potential_area_served * 0.7)
+                score = 0.3 * min(min_distance_to_park / 3000, 1) + 0.7 * potential_area_served / (np.pi * 500 ** 2)
                 
                 results.append({
                     "geometry": point,
@@ -264,7 +271,7 @@ class SpatialAnalyst:
                 })
             
             # Convert to GeoDataFrame
-            gdf_candidates = gpd.GeoDataFrame(results, crs="EPSG:3857")
+            gdf_candidates = gpd.GeoDataFrame(results, crs=config.METRIC_CRS)
             
             # Sort by score (higher is better)
             gdf_candidates = gdf_candidates.sort_values("score", ascending=False)
@@ -295,7 +302,7 @@ class SpatialAnalyst:
                     break
             
             # Convert to GeoDataFrame
-            gdf_selected = gpd.GeoDataFrame(selected_candidates, crs="EPSG:3857")
+            gdf_selected = gpd.GeoDataFrame(selected_candidates, crs=config.METRIC_CRS)
             
             # Add rank column (1 = highest score/best location)
             gdf_selected['rank'] = range(1, len(gdf_selected) + 1)
@@ -318,94 +325,9 @@ class SpatialAnalyst:
             )
     
     def calculate_sector_green_metrics(self):
-        """
-        Calculate metrics about green spaces by sector.
-        
-        This method analyzes the distribution of parks across Bucharest's sectors,
-        computing statistics such as:
-        - Number of parks per sector
-        - Parks per square kilometer
-        - Parks per 100,000 residents
-        - Air quality statistics (if available)
-        
-        The method includes simulated population and area data that would
-        be replaced with actual census data in a production environment.
-        
-        Returns:
-            DataFrame with sector metrics including park count, density metrics,
-            and air quality statistics
-        """
-        if len(self.data) == 0:
-            print("No data available for sector metrics calculation")
-            return pd.DataFrame()
-            
-        try:
-            # Check if sector column exists in the data
-            if 'sector' not in self.data.columns:
-                print("'sector' column not found in data")
-                return pd.DataFrame({"error": ["Sector information not available in the dataset"]})
-            
-            # Group by sector to get basic park counts
-            sector_stats = self.data.groupby('sector').size().reset_index(name='park_count')
-            
-            # Get population data (simulated - in a real app, you'd use actual census data)
-            # These values approximate the actual population of Bucharest sectors
-            simulated_population = {
-                'Sector 1': 246422,
-                'Sector 2': 345370,
-                'Sector 3': 385439,
-                'Sector 4': 287828,
-                'Sector 5': 271575,
-                'Sector 6': 389128
-            }
-            
-            # Get area data for sectors in square kilometers (simulated)
-            simulated_area = {
-                'Sector 1': 70,
-                'Sector 2': 32,
-                'Sector 3': 34,
-                'Sector 4': 34,
-                'Sector 5': 30,
-                'Sector 6': 38
-            }
-            
-            # Add population and area to dataframe safely using .get() to avoid KeyErrors
-            # for any sectors not in the simulated data
-            sector_stats['population'] = sector_stats['sector'].apply(
-                lambda x: simulated_population.get(x, 300000)
-            )
-            sector_stats['area_sqkm'] = sector_stats['sector'].apply(
-                lambda x: simulated_area.get(x, 40)
-            )
-            
-            # Calculate derived metrics safely
-            # Parks per square km (density metric)
-            sector_stats['parks_per_sqkm'] = sector_stats['park_count'] / sector_stats['area_sqkm']
-            # Parks per 100,000 residents (accessibility metric)
-            sector_stats['parks_per_100k_residents'] = sector_stats['park_count'] / sector_stats['population'] * 100000
-            
-            # Add air quality metrics if available in the dataset
-            if 'aqi' in self.data.columns:
-                # Group by sector and calculate mean, min, max AQI values
-                aqi_stats = self.data.groupby('sector')['aqi'].agg(['mean', 'min', 'max']).reset_index()
-                
-                # Merge with existing statistics
-                sector_stats = pd.merge(sector_stats, aqi_stats, on='sector', how='left')
-                
-                # Rename columns for clarity
-                sector_stats = sector_stats.rename(columns={
-                    'mean': 'avg_aqi',
-                    'min': 'best_aqi',
-                    'max': 'worst_aqi'
-                })
-            
-            return sector_stats
-            
-        except Exception as e:
-            print(f"Error calculating sector green metrics: {e}")
-            # Return a DataFrame with error information
-            return pd.DataFrame({"error": [f"Analysis failed: {str(e)}"]})
-    
+        from .sectors import sector_metrics
+        return sector_metrics(self.data)
+
     def find_path_between_parks(self, start_park_name, end_park_name):
         """
         Find the shortest path between two parks using the street network.

@@ -1,3 +1,4 @@
+from html import escape
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import folium
@@ -25,7 +26,9 @@ class UrbanVisualizer:
         Args:
             gdf_data: GeoDataFrame containing urban data with geometries
         """
-        self.data = gdf_data
+        self.data = gdf_data.copy() if gdf_data is not None else None
+        if self.data is not None:
+            self.data.geometry = self.data.geometry.representative_point()
 
     def create_simplified_map(self):
         """
@@ -71,7 +74,7 @@ class UrbanVisualizer:
             point = None
             coords = None
             if hasattr(row.geometry, 'centroid'):
-                point = row.geometry.centroid
+                point = row.geometry.representative_point()
                 coords = (point.y, point.x)
             else:
                 try:
@@ -93,13 +96,13 @@ class UrbanVisualizer:
                 if name_col in row and pd.notna(row[name_col]) and str(row[name_col]).strip():
                     name = row[name_col]
                     break
-            popup_items.append(f"<b>name</b>: {name or 'Unnamed Location'}")
+            popup_items.append(f"<b>name</b>: {escape(str(name or 'Unnamed Location'))}")
 
             # Add all available attributes to popup
             if 'sector' in row and pd.notna(row['sector']):
-                popup_items.append(f"<b>sector</b>: {row['sector']}")
+                popup_items.append(f"<b>sector</b>: {escape(str(row['sector']))}")
             if 'id' in row and pd.notna(row['id']):
-                popup_items.append(f"<b>id</b>: {row['id']}")
+                popup_items.append(f"<b>id</b>: {escape(str(row['id']))}")
             lat = point.y if point else coords[0]
             lng = point.x if point else coords[1]
             popup_items.append(f"<b>latitude</b>: {lat:.6f}")
@@ -108,16 +111,16 @@ class UrbanVisualizer:
             # Try to find address information in different possible column names
             for attr in ['street', 'address', 'strada', 'adresa']:
                 if attr in row and pd.notna(row[attr]):
-                    popup_items.append(f"<b>street</b>: {row[attr]}")
+                    popup_items.append(f"<b>street</b>: {escape(str(row[attr]))}")
                     break
 
             # Add city and country info (default to Bucharest/Romania if not specified)
             if 'city' in row and pd.notna(row['city']):
-                popup_items.append(f"<b>city</b>: {row['city']}")
+                popup_items.append(f"<b>city</b>: {escape(str(row['city']))}")
             else:
                 popup_items.append("<b>city</b>: Bucuresti")
             if 'country' in row and pd.notna(row['country']):
-                popup_items.append(f"<b>country</b>: {row['country']}")
+                popup_items.append(f"<b>country</b>: {escape(str(row['country']))}")
             else:
                 popup_items.append("<b>country</b>: Romania")
 
@@ -125,6 +128,9 @@ class UrbanVisualizer:
             for attr in ['aqi', 'pm1', 'pm25', 'pm10']:
                 if attr in row and pd.notna(row[attr]):
                     popup_items.append(f"<b>{attr}</b>: {row[attr]:.2f}")
+            for attr in ['air_source', 'air_index', 'air_observed_at', 'sensor_distance_meters', 'data_mode']:
+                if attr in row and pd.notna(row[attr]):
+                    popup_items.append(f"<b>{attr}</b>: {escape(str(row[attr]))}")
 
             # Add noise information if available
             for attr in ['noise_level', 'noise_day', 'noise_night', 'noise_level_db']:
@@ -146,7 +152,7 @@ class UrbanVisualizer:
 
             # Determine marker color based on available data
             # Default color is green if no quality metrics are available
-            color = 'green'
+            color = '#7b8790'  # Unknown measurements must not look healthy.
             
             # Priority for coloring: AQI (air quality), then noise
             if 'aqi' in row and pd.notna(row['aqi']) and aqi_min is not None and aqi_max is not None and aqi_max > aqi_min:
@@ -850,7 +856,8 @@ class UrbanVisualizer:
             
         # Create full path in the data directory
         import os
-        filepath = os.path.join(config.DATA_DIR, filename)
+        os.makedirs(config.MAPS_DIR, exist_ok=True)
+        filepath = os.path.join(config.MAPS_DIR, os.path.basename(filename))
         
         # Save map to file
         map_obj.save(filepath)

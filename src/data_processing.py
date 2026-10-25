@@ -3,6 +3,7 @@ import geopandas as gpd
 import numpy as np
 from shapely.geometry import Point
 from . import config
+from .evidence import fresh_air_mask
 
 def _drop_tie_duplicates(gdf):
     """
@@ -37,8 +38,11 @@ def process_and_integrate_data(data_dict):
     # Each represents a different aspect of the urban environment
     parks_sectors = data_dict.get('parks_sectors')
     air_quality = data_dict.get('air_quality')
-    traffic = data_dict.get('traffic')
-    noise = data_dict.get('noise')
+    if air_quality is not None and len(air_quality):
+        # An offline sensor must not hide a nearby functioning sensor.
+        air_quality = air_quality[fresh_air_mask(air_quality)].copy()
+    traffic = data_dict.get('traffic') if config.ENABLE_SIMULATED_DATA else None
+    noise = data_dict.get('noise') if config.ENABLE_SIMULATED_DATA else None
     
     # Verify we have the fundamental data needed (parks and their sectors)
     if parks_sectors is None or len(parks_sectors) == 0:
@@ -55,34 +59,33 @@ def process_and_integrate_data(data_dict):
     # Count original parks for reporting
     original_park_count = len(gdf_parks)
     
-    # Remove entries with "insula" in name as these are island features, not parks
-    # Uses case-insensitive matching
-    gdf_parks = gdf_parks[~gdf_parks['name'].str.lower().str.contains('insula')]
+    # Names are not identities: distinct parks can share names.
     
-    # For parks with the same name but different locations, keep only the first entry
-    # This avoids duplicate entries in the final dataset
-    gdf_parks = gdf_parks.drop_duplicates(subset=['name'], keep='first')
+    # Preserve same-name parks with distinct stable identities or geometries.
+    gdf_parks = gdf_parks.drop_duplicates(subset=['park_id'], keep='first') if 'park_id' in gdf_parks else gdf_parks.drop_duplicates(subset=['name', 'geometry'], keep='first')
     
     # Report results of cleaning process
     removed_parks_count = original_park_count - len(gdf_parks)
-    print(f"   • Removed {removed_parks_count} parks (duplicates or with 'insula' in name)")
+    print(f"   • Removed {removed_parks_count} parks (duplicate identities)")
     print(f"   • {len(gdf_parks)} unique parks remain after cleaning")
     
     # --- 2. Process and integrate air quality data ---
     if air_quality is not None and len(air_quality) > 0:
         print(" → Integrating air quality data...")
         
-        # Project both datasets to a metric coordinate system (EPSG:3857)
+        # Project both datasets to a metric coordinate system (local UTM)
         # This is necessary for accurate distance calculations in meters
-        gdf_parks_proj = gdf_parks.to_crs("EPSG:3857")
-        gdf_air_quality_proj = air_quality.to_crs("EPSG:3857")
-        
-        # Fill missing values in air quality measurements with the mean
-        # to avoid gaps in the data
-        for col in ['aqi', 'pm25', 'pm10', 'temperature', 'humidity']:
-            if col in gdf_air_quality_proj.columns:
-                gdf_air_quality_proj[col] = gdf_air_quality_proj[col].fillna(gdf_air_quality_proj[col].mean())
-        
+        gdf_parks_proj = gdf_parks.to_crs(config.METRIC_CRS)
+        gdf_air_quality_proj = air_quality.to_crs(config.METRIC_CRS)
+
+        # Keep missing measurements missing; carry source identity and observation time.
+        air_columns = [c for c in ('aqi', 'pm25', 'pm10', 'temperature', 'humidity',
+                                  'air_observed_at', 'air_fetched_at', 'air_source', 'air_index', 'geometry')
+                       if c in gdf_air_quality_proj]
+        if 'id' in gdf_air_quality_proj:
+            gdf_air_quality_proj['sensor_id'] = gdf_air_quality_proj['id']
+            air_columns.append('sensor_id')
+        gdf_air_quality_proj = gdf_air_quality_proj[air_columns]
         # Perform a nearest neighbor spatial join to associate each park
         # with its closest air quality sensor
         gdf_parks_with_aqi = gpd.sjoin_nearest(
@@ -93,13 +96,21 @@ def process_and_integrate_data(data_dict):
         )
         
         # Keep only the relevant columns to avoid cluttering the dataset
-        keep_cols = ['name', 'sector', 'geometry', 'aqi', 'pm25', 'pm10', 
-                     'temperature', 'humidity', 'sensor_distance_meters']
         gdf_parks_with_aqi = _drop_tie_duplicates(gdf_parks_with_aqi)
-        gdf_parks_with_aqi = gdf_parks_with_aqi[
-            [col for col in keep_cols if col in gdf_parks_with_aqi.columns]
-        ]
-        
+        if 'air_observed_at' in gdf_parks_with_aqi:
+            observed = pd.to_datetime(gdf_parks_with_aqi.air_observed_at, utc=True, errors='coerce', format='mixed')
+            age_seconds = (pd.Timestamp.now(tz='UTC') - observed).dt.total_seconds()
+            valid = ((age_seconds >= 0) &
+                     (age_seconds <= config.MAX_AIR_AGE_HOURS * 3600) &
+                     (gdf_parks_with_aqi.sensor_distance_meters <= config.MAX_SENSOR_DISTANCE_METERS))
+        else:
+            valid = pd.Series(False, index=gdf_parks_with_aqi.index)
+        gdf_parks_with_aqi['air_usable'] = valid
+        for column in ('aqi', 'pm25', 'pm10', 'temperature', 'humidity'):
+            if column in gdf_parks_with_aqi:
+                gdf_parks_with_aqi.loc[~valid, column] = np.nan
+                gdf_parks_with_aqi.loc[gdf_parks_with_aqi[column] < 0, column] = np.nan
+
         # Convert back to WGS84 (standard geographic coordinates)
         gdf_parks = gdf_parks_with_aqi.to_crs("EPSG:4326")
     
@@ -108,8 +119,8 @@ def process_and_integrate_data(data_dict):
         print(" → Integrating noise level data...")
         
         # Project to metric coordinate system for spatial operations
-        gdf_parks_proj = gdf_parks.to_crs("EPSG:3857")
-        gdf_noise_proj = noise.to_crs("EPSG:3857")
+        gdf_parks_proj = gdf_parks.to_crs(config.METRIC_CRS)
+        gdf_noise_proj = noise.to_crs(config.METRIC_CRS)
         
         # Find the nearest noise measurement point for each park
         # and calculate the distance to that measurement
@@ -129,7 +140,7 @@ def process_and_integrate_data(data_dict):
         print(" → Calculating traffic congestion metrics...")
         
         # Project to metric coordinate system for buffer operations
-        gdf_parks_proj = gdf_parks.to_crs("EPSG:3857")
+        gdf_parks_proj = gdf_parks.to_crs(config.METRIC_CRS)
         
         # Define a 500-meter buffer around each park to analyze nearby roads
         # This represents a reasonable walking distance from the park
@@ -137,7 +148,8 @@ def process_and_integrate_data(data_dict):
         gdf_parks_proj['geometry_buffer'] = gdf_parks_proj.geometry.buffer(buffer_distance)
         
         # Project traffic data to the same coordinate system
-        traffic_proj = traffic.to_crs("EPSG:3857")
+        traffic_proj = traffic.to_crs(config.METRIC_CRS)
+        traffic_proj = traffic_proj[[c for c in ('geometry', 'congestion_level', 'speed_factor', 'travel_time_seconds') if c in traffic_proj]]
         
         # Find the nearest road segment to each park
         # In a more advanced implementation, this could analyze all roads within the buffer
@@ -156,50 +168,21 @@ def process_and_integrate_data(data_dict):
     
     # --- 5. Calculate additional metrics and quality scores ---
     print(" → Calculating additional metrics and scores...")
-    
-    # Initialize the overall park quality score
-    gdf_parks['quality_score'] = 0
-    
-    # Incorporate air quality into the score if available
-    if 'aqi' in gdf_parks.columns:
-        # Air Quality Index: lower is better, so invert the scale
-        # Find the range of AQI values in the dataset
-        aqi_min = gdf_parks['aqi'].min()
-        aqi_max = gdf_parks['aqi'].max()
-        aqi_range = aqi_max - aqi_min
-        
-        if aqi_range > 0:  # Avoid division by zero
-            # Convert to 0-10 scale, where 10 is best (lowest AQI)
-            gdf_parks['aqi_score'] = 10 - ((gdf_parks['aqi'] - aqi_min) / aqi_range * 10)
-            gdf_parks['quality_score'] += gdf_parks['aqi_score']
-    
-    # Incorporate noise levels into the score if available
-    if 'noise_level_db' in gdf_parks.columns:
-        # Noise level: lower is better
-        noise_min = gdf_parks['noise_level_db'].min()
-        noise_max = gdf_parks['noise_level_db'].max()
-        noise_range = noise_max - noise_min
-        
-        if noise_range > 0:  # Avoid division by zero
-            # Convert to 0-10 scale, where 10 is best (lowest noise)
-            gdf_parks['noise_score'] = 10 - ((gdf_parks['noise_level_db'] - noise_min) / noise_range * 10)
-            gdf_parks['quality_score'] += gdf_parks['noise_score']
-    
-    # Incorporate traffic congestion into the score if available
-    if 'congestion_level' in gdf_parks.columns:
-        # Traffic congestion is on a scale of 1-5, where 1 is best
-        # Convert to 0-10 scale, where 10 is best (lowest congestion)
-        gdf_parks['traffic_score'] = 10 - (gdf_parks['congestion_level'] * 2)
-        gdf_parks['quality_score'] += gdf_parks['traffic_score']
-    
-    # Average over the metrics that actually contributed to the score
-    num_metrics = sum(col in gdf_parks.columns for col in ('aqi_score', 'noise_score', 'traffic_score'))
-    
-    # Normalize the final quality score to a 0-10 scale
-    # This makes it comparable across different parks regardless of available data
-    if num_metrics > 0:
-        gdf_parks['quality_score'] = gdf_parks['quality_score'] / num_metrics
-    
+    if 'aqi' not in gdf_parks:
+        gdf_parks['aqi'] = np.nan
+        gdf_parks['air_usable'] = False
+
+    # Scores are relative comparisons, never absolute environmental grades.
+    score_columns = []
+    for measurement, score_name in [('aqi', 'aqi_score')]:
+        if measurement in gdf_parks:
+            values = pd.to_numeric(gdf_parks[measurement], errors='coerce')
+            span = values.max() - values.min()
+            gdf_parks[score_name] = 10 - 10 * (values - values.min()) / span if span > 0 else values.where(values.isna(), 5.0)
+            score_columns.append(score_name)
+    gdf_parks['quality_score'] = gdf_parks[score_columns].mean(axis=1) if score_columns else np.nan
+    gdf_parks['data_mode'] = 'simulation' if config.ENABLE_SIMULATED_DATA else 'measured'
+
     # Joins may rename the park name column to 'name_left'; other code looks for either
     # spelling, so make sure both always exist
     if 'name' not in gdf_parks.columns and 'name_left' in gdf_parks.columns:
@@ -208,7 +191,15 @@ def process_and_integrate_data(data_dict):
         gdf_parks['name_left'] = gdf_parks['name']
     
     # --- 6. Save processed data to file for future use ---
-    gdf_parks.to_file(config.PROCESSED_DATA_FILE, driver="GeoJSON")
+    from pathlib import Path
+    from uuid import uuid4
+    target = Path(config.PROCESSED_DATA_FILE)
+    temporary = target.with_name(f".{target.stem}-{uuid4().hex}.geojson")
+    try:
+        gdf_parks.to_file(temporary, driver="GeoJSON")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
     print(f"✓ Processed data saved to '{config.PROCESSED_DATA_FILE}'")
     
     return gdf_parks

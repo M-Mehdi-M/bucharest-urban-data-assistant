@@ -10,6 +10,15 @@ load_dotenv()
 AIRLY_API_KEY = os.getenv("AIRLY_API_KEY", "")
 # URL for the Overpass API which provides OpenStreetMap data for geographic queries
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
+HTTP_USER_AGENT = 'BucharestUrbanDataAssistant/1.0'
+OVERPASS_ENDPOINTS = tuple(endpoint.strip() for endpoint in os.getenv(
+    'OVERPASS_ENDPOINTS',
+    'https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter'
+).split(',') if endpoint.strip())
+OSM_REQUEST_TIMEOUT = 30
+AIR_REFRESH_MINUTES = int(os.getenv('AIR_REFRESH_MINUTES', '360'))
+AIRLY_MAX_MEASUREMENTS_PER_REFRESH = max(1, min(int(os.getenv('AIRLY_MAX_MEASUREMENTS_PER_REFRESH', '20')), 100))
+AIRLY_COLLECTION_BUDGET_SECONDS = 120
 # Base URL for Airly API endpoints - used to fetch air quality measurements
 AIRLY_BASE_URL = "https://airapi.airly.eu/v2"
 
@@ -17,10 +26,15 @@ AIRLY_BASE_URL = "https://airapi.airly.eu/v2"
 # Google Gemini API settings used for natural language processing
 # Put your key in a .env file in the project root: GEMINI_API_KEY=your_key_here
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 # Maximum time in seconds to wait for a response from the language model
-GEMINI_TIMEOUT = 120
+GEMINI_TIMEOUT = 30
+ENABLE_SIMULATED_DATA = os.getenv("ENABLE_SIMULATED_DATA", "false").lower() == "true"
+METRIC_CRS = "EPSG:32635"  # UTM 35N: local distances and areas around Bucharest
+MAX_SENSOR_DISTANCE_METERS = 3000
+MAX_AIR_AGE_HOURS = 24
+MAPS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "maps")
 
 # --- Geographic & Search Parameters ---
 # Bounding box coordinates that define the area of Bucharest for data collection
@@ -55,10 +69,13 @@ os.makedirs(STATIC_DATA_DIR, exist_ok=True)
 os.makedirs(DYNAMIC_DATA_DIR, exist_ok=True)
 
 # Static data file paths - these files contain information that rarely changes
+SECTORS_FILE = os.path.join(STATIC_DATA_DIR, "bucharest_sectors.geojson")
+CITY_BOUNDARY_FILE = os.path.join(STATIC_DATA_DIR, "bucharest_boundary.geojson")
 PARKS_SECTORS_FILE = os.path.join(STATIC_DATA_DIR, "bucharest_parks_sectors.geojson")
 
 # Daily update data - air quality information that needs daily refreshing
 AIR_QUALITY_FILE = os.path.join(DYNAMIC_DATA_DIR, "air_quality.geojson")
+AIRLY_QUOTA_FILE = os.path.join(DYNAMIC_DATA_DIR, 'airly_quota.json')
 
 # Weather forecast data files - separate hourly and daily forecasts
 WEATHER_FORECAST_HOURLY_FILE = os.path.join(DYNAMIC_DATA_DIR, "weather_forecast_hourly.geojson")

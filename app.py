@@ -1,483 +1,326 @@
-import os
-import sys
-import time
+"""Web API with atomic snapshots and stale-while-refresh availability."""
 import argparse
-import threading
 import logging
+import sys
+import threading
+import time
 import uuid
-from collections import deque, OrderedDict
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
-# Add the project root to the Python path so we can import modules
-PROJECT_DIR = os.path.abspath(os.path.dirname(__file__))
-sys.path.insert(0, PROJECT_DIR)
-# Generated files (visualizations/, data/) use paths relative to the project folder
-os.chdir(PROJECT_DIR)
+from flask import Flask, jsonify, render_template, request, send_from_directory
 
-# Import custom modules for data collection, processing and visualization
+from src import config
+from src import source_health
+from src.agent import UrbanDataAgent
+from src.contracts import validate_query
 from src.data_collection import collect_all_data
 from src.data_processing import process_and_integrate_data
-from src.agent import UrbanDataAgent
 from src.visualization import UrbanVisualizer
-import src.config as config
 
-# Configure logging with timestamp, level and message format
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, 'reconfigure'):
+        stream.reconfigure(encoding='utf-8', errors='replace')
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024
 
-# Create Flask web application instance with specified template and static file locations
-app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# Global variables to store application state across requests
-gdf_data = None  # Will hold the processed GeoDataFrame
-agent = None     # Will hold the Urban Data Agent for query processing
-visualizer = None  # Will hold the visualization component
+@dataclass(frozen=True)
+class Snapshot:
+    data: object
+    agent: object
+    visualizer: object
+    updated_at: str
+    map_file: str
 
-# Thread management for background data updates
-update_thread = None
+
+@dataclass
+class Conversation:
+    history: list = field(default_factory=list)
+    lock: object = field(default_factory=threading.Lock)
+
+
+_snapshot = None
+_state_lock = threading.Lock()
+_load_lock = threading.Lock()
+_session_lock = threading.Lock()
+_bootstrap_lock = threading.Lock()
+_started = False
 is_updating = False
-last_update_time = None
-_load_lock = threading.Lock()  # Only one data load may run at a time
-
-# --- Per-user conversations and simple rate limiting (in memory) ---
-MAX_QUERY_LENGTH = 500          # Longest question accepted (characters)
-MAX_SESSIONS = 500              # Conversations kept in memory; the oldest are dropped
-RATE_LIMIT_QUERIES = 20         # Questions allowed per IP ...
-RATE_LIMIT_WINDOW = 60          # ... in this many seconds
-UPDATE_COOLDOWN = 300           # Minimum seconds between manual data updates
-sessions = OrderedDict()        # session id -> conversation history
-_sessions_lock = threading.Lock()
-_request_log = {}               # IP -> timestamps of recent questions
+last_error = None
 _last_manual_update = 0.0
+sessions = OrderedDict()
+_request_log = OrderedDict()
+MAX_SESSIONS = 500
+MAX_QUERY_LENGTH = 500
+UPDATE_COOLDOWN = 300
+
+
+def publish(data):
+    """Build everything first: failed initialization never replaces working state."""
+    global _snapshot
+    agent = UrbanDataAgent(data)
+    visualizer = UrbanVisualizer(data)
+    map_file = f'parks_{uuid.uuid4().hex}.html'
+    visualizer.save_map(visualizer.create_simplified_map(), map_file)
+    snapshot = Snapshot(data, agent, visualizer, datetime.now(timezone.utc).isoformat(), map_file)
+    with _state_lock:
+        _snapshot = snapshot
+
+
+def load_data(force_update=False, reserved=False):
+    global is_updating, last_error
+    if not reserved and not _load_lock.acquire(blocking=False):
+        return False
+    with _state_lock:
+        is_updating = True
+    try:
+        collected = collect_all_data(force_update=force_update)
+        data = process_and_integrate_data(collected)
+        if data is None or data.empty:
+            raise ValueError('No usable park records')
+        publish(data)
+        with _state_lock:
+            last_error = None
+        return True
+    except Exception:
+        logger.exception('Data refresh failed; preserving previous snapshot')
+        with _state_lock:
+            last_error = 'Actualizarea nu a reușit. Ultimul set disponibil este păstrat.'
+        return False
+    finally:
+        with _state_lock:
+            is_updating = False
+        _load_lock.release()
+
+
+def _startup():
+    global is_updating
+    # Fast offline startup from source caches; reprocess to enforce evidence rules.
+    if Path(config.PARKS_SECTORS_FILE).exists() and _load_lock.acquire(blocking=False):
+        with _state_lock:
+            is_updating = True
+        try:
+            import geopandas as gpd
+            cached = {'parks_sectors': gpd.read_file(config.PARKS_SECTORS_FILE)}
+            if Path(config.AIR_QUALITY_FILE).exists():
+                cached['air_quality'] = gpd.read_file(config.AIR_QUALITY_FILE)
+            data = process_and_integrate_data(cached)
+            if data is not None and not data.empty:
+                publish(data)
+        except Exception:
+            logger.exception('Cached startup unavailable')
+        finally:
+            with _state_lock:
+                is_updating = False
+            _load_lock.release()
+    load_data()
+
+
+def _periodic_refresh():
+    while True:
+        time.sleep(6 * 60 * 60)
+        load_data()  # Static geometry need not be downloaded every six hours.
+
+
+def create_app(start_background=True):
+    """WSGI factory: waitress-serve --call app:create_app (one process)."""
+    global _started
+    if start_background:
+        with _bootstrap_lock:
+            if not _started:
+                _started = True
+                threading.Thread(target=_startup, daemon=True).start()
+                threading.Thread(target=_periodic_refresh, daemon=True).start()
+    return app
 
 
 def rate_limited(ip):
-    """Return True if this IP has asked too many questions recently."""
-    now = time.time()
-    with _sessions_lock:
+    now = time.monotonic()
+    with _session_lock:
         log = _request_log.setdefault(ip, deque())
-        while log and now - log[0] > RATE_LIMIT_WINDOW:
+        _request_log.move_to_end(ip)
+        while log and now - log[0] >= 60:
             log.popleft()
-        if len(log) >= RATE_LIMIT_QUERIES:
+        if len(log) >= 20:
             return True
         log.append(now)
-        # Forget IPs that have been quiet, so the dictionary cannot grow forever
-        if len(_request_log) > 1000:
-            for key in [k for k, v in _request_log.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]:
-                _request_log.pop(key, None)
+        while len(_request_log) > 4096:
+            _request_log.popitem(last=False)
     return False
 
 
 @app.after_request
-def add_security_headers(response):
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    response.headers.setdefault("Referrer-Policy", "same-origin")
+def security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    if request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
     return response
 
-def debug_data(data, label="Data"):
-    """Print debug information about the data structure for troubleshooting
 
-    Args:
-        data: The data object to inspect
-        label: A descriptive label for the log entries
-    """
-    try:
-        if data is None:
-            logger.info(f"{label}: None")
-            return
+@app.errorhandler(413)
+def too_large(_error):
+    return jsonify(error='Cererea este prea mare.'), 413
 
-        if hasattr(data, "columns"):
-            logger.info(f"{label} columns: {data.columns.tolist()}")
-            if len(data) > 0:
-                logger.info(f"{label} first row keys: {list(data.iloc[0].keys())}")
-        elif isinstance(data, dict):
-            logger.info(f"{label} keys: {list(data.keys())}")
-        else:
-            logger.info(f"{label} type: {type(data)}")
-    except Exception as e:
-        logger.error(f"Error debugging {label}: {e}")
 
-def load_data(force_update=False):
-    """Load and process urban data from various sources
-
-    Args:
-        force_update: If True, force refresh of all data sources ignoring cache
-
-    Returns:
-        bool: True if data loading succeeded, False otherwise
-    """
-    global gdf_data, agent, visualizer, is_updating, last_update_time
-
-    if not _load_lock.acquire(blocking=False):
-        logger.info("O încărcare de date este deja în curs; se ignoră cererea.")  # A load is already running
-        return False
-
-    try:
-        is_updating = True
-        logger.info("Începe colectarea și procesarea datelor...")  # Starting data collection and processing
-
-        # 1. Collect all necessary data from various sources
-        data_dict = collect_all_data(force_update=force_update)
-        debug_data(data_dict, "Dicționar date colectate")
-
-        # Check if we have the essential data about parks and sectors
-        if not data_dict or 'parks_sectors' not in data_dict or data_dict['parks_sectors'].empty:
-            logger.error("Eșec la colectarea datelor esențiale")  # Failed to collect essential data
-            is_updating = False
-            return False
-
-        # 2. Process and integrate data from different sources
-        logger.info("Procesare și integrare date...")  # Processing and integrating data
-        processed_data = process_and_integrate_data(data_dict)
-        debug_data(processed_data, "Date procesate")
-
-        if processed_data is None or processed_data.empty:
-            logger.error("Procesarea datelor a eșuat sau a produs rezultate goale")  # Data processing failed or produced empty result
-            is_updating = False
-            return False
-
-        # Successfully processed - update global variables for app use
-        gdf_data = processed_data
-
-        # 3. Initialize the agent and visualizer with the processed data
-        logger.info("Inițializare agent și vizualizator...")  # Initializing agent and visualizer
-        agent = UrbanDataAgent(gdf_data)
-        visualizer = UrbanVisualizer(gdf_data)
-
-        last_update_time = datetime.now()
-        is_updating = False
-        logger.info("Încărcare date finalizată cu succes")  # Data loading completed successfully
-
-        return True
-    except Exception as e:
-        logger.error(f"Eroare la încărcarea datelor: {e}")  # Error loading data
-        is_updating = False
-        return False
-    finally:
-        _load_lock.release()
-
-def update_data_periodically():
-    """Background thread function that updates data every 6 hours
-
-    This runs continuously in the background and refreshes data
-    to ensure the application has up-to-date information.
-    """
-    global is_updating
-
-    while True:
-        # Sleep for 6 hours between updates
-        time.sleep(6 * 60 * 60)
-
-        # Only update if not already updating
-        if not is_updating:
-            logger.info("Începe actualizarea programată a datelor...")  # Scheduled data update starting
-            load_data(force_update=True)
-            logger.info("Actualizarea programată a datelor s-a terminat.")  # Scheduled data update completed
-
-@app.route('/')
+@app.get('/')
 def home():
-    """Flask route handler for the home page
+    snapshot = _snapshot
+    sectors = []
+    if snapshot is not None:
+        counts = snapshot.data.groupby('sector').size().sort_values(ascending=False)
+        sectors = [{'name': name, 'count': int(count)} for name, count in counts.items()]
+    return render_template('index.html', map_file=snapshot.map_file if snapshot else None,
+                           parks_count=len(snapshot.data) if snapshot else 0,
+                           sectors=sectors, is_updating=is_updating, ready=snapshot is not None,
+                           simulation=config.ENABLE_SIMULATED_DATA,
+                           last_update=snapshot.updated_at if snapshot else 'În așteptare',
+                           error_message=last_error or source_health.warning())
 
-    Prepares all necessary data for rendering the main web interface,
-    including maps, statistics and status information.
-    """
-    global gdf_data, visualizer, last_update_time
 
-    # Create default park map
-    map_html = None  # No map until data is loaded
-    parks_count = 0
-    sectors_data = []
-    update_info = "Datele nu au fost încă încărcate"  # Data not yet loaded
-    error_message = None
+@app.get('/api/status')
+@app.get('/debug-data')
+def status():
+    snapshot = _snapshot
+    counts = snapshot.data.groupby('sector').size().sort_values(ascending=False) if snapshot else {}
+    payload = {'ready': snapshot is not None, 'is_updating': is_updating,
+               'rows': len(snapshot.data) if snapshot else 0,
+               'last_update': snapshot.updated_at if snapshot else None,
+               'map_url': f'/maps/{snapshot.map_file}' if snapshot else None,
+               'data_mode': 'simulation' if config.ENABLE_SIMULATED_DATA else 'measured',
+               'message': last_error or source_health.warning(),
+               'llm_configured': bool(config.GEMINI_API_KEY)}
+    payload['sources'] = source_health.snapshot()
+    payload['air_quality_parks'] = int(snapshot.data.aqi.notna().sum()) if snapshot and 'aqi' in snapshot.data else 0
+    payload['degraded'] = bool(source_health.warning())
+    payload['sectors'] = [{'name': name, 'count': int(count)} for name, count in counts.items()]
+    return jsonify(payload)
 
-    try:
-        if gdf_data is not None and visualizer is not None:
-            logger.info("Creare hartă pentru pagina principală")  # Creating map for home page
-            debug_data(gdf_data, "GeoDataFrame pentru vizualizare")
 
-            # Check which columns are available for visualization
-            available_cols = gdf_data.columns.tolist()
-            column = 'aqi' if 'aqi' in available_cols else None
-
-            # Create park map with available columns
-            park_map = visualizer.create_simplified_map()
-            map_path = visualizer.save_map(park_map, "current_view.html")
-            map_html = os.path.basename(map_path)
-
-            # Get park count for statistics
-            parks_count = len(gdf_data)
-
-            # Get sectors data if available for the sector breakdown
-            if 'sector' in available_cols:
-                sector_counts = gdf_data.groupby('sector').size().sort_values(ascending=False)
-                sectors_data = [{"name": k, "count": v} for k, v in sector_counts.items()]
-            else:
-                sectors_data = [{"name": "Toate Sectoarele", "count": parks_count}]  # All sectors
-
-            # Format last update time for display
-            if last_update_time:
-                update_info = last_update_time.strftime("%Y-%m-%d %H:%M:%S")
-    except Exception as e:
-        logger.error(f"Eroare la crearea conținutului paginii principale: {e}")  # Error creating home page content
-        error_message = f"Eroare la pregătirea vizualizării: {str(e)}"  # Error preparing visualization
-
-    return render_template(
-        'index.html',
-        map_file=map_html,
-        parks_count=parks_count,
-        sectors=sectors_data,
-        is_updating=is_updating,
-        last_update=update_info,
-        error_message=error_message
-    )
-
-# Add a route to serve visualization files
-@app.route('/visualizations/<path:filename>')
-def serve_visualization(filename):
-    """Serve generated visualization images from the visualizations directory
-
-    This route allows the web interface to access generated visualizations
-    like charts, maps, and other graphical data representations.
-    """
-    try:
-        # Create visualization directory if it doesn't exist
-        visualization_dir = os.path.join(os.path.dirname(__file__), "visualizations")
-        os.makedirs(visualization_dir, exist_ok=True)
-
-        return send_from_directory(visualization_dir, filename)
-    except Exception as e:
-        logger.error(f"Eroare la servirea vizualizării {filename}: {e}")  # Error serving visualization
-        return "Fișierul de vizualizare nu a fost găsit", 404  # Visualization file not found
-
-# Update the process_query route to include visualization path
-@app.route('/api/query', methods=['POST'])
+@app.post('/api/query')
 def process_query():
-    """API endpoint for processing natural language queries about urban data
-
-    Receives user queries via POST requests and passes them to the agent
-    for processing, returning the response and any generated visualizations as JSON.
-    """
-    global agent
-
-    if agent is None:
-        return jsonify({'error': 'Agentul nu este inițializat. Vă rugăm să așteptați finalizarea încărcării datelor.'}), 503  # Agent not initialized
-
-    if is_updating:
-        return jsonify({'error': 'Datele sunt în curs de actualizare. Vă rugăm să încercați din nou în câteva momente.'}), 503  # Data is being updated
-
+    try:
+        query = validate_query(request.get_json(silent=True), MAX_QUERY_LENGTH)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    snapshot = _snapshot
+    if snapshot is None:
+        response = jsonify(error='Datele se pregătesc. Te anunțăm când poți începe.')
+        response.headers['Retry-After'] = '5'
+        return response, 503
     if rate_limited(request.remote_addr):
-        return jsonify({'error': 'Prea multe întrebări într-un timp scurt. Te rog așteaptă un minut.'}), 429  # Too many requests
-
-    data = request.get_json(silent=True) or {}
-    user_query = str(data.get('query', '')).strip()
-
-    if not user_query:
-        return jsonify({'error': 'Nu a fost furnizată nicio întrebare'}), 400  # No query provided
-    if len(user_query) > MAX_QUERY_LENGTH:
-        return jsonify({'error': f'Întrebarea este prea lungă (maximum {MAX_QUERY_LENGTH} caractere).'}), 400  # Query too long
-
-    # Each browser gets its own conversation, identified by a random cookie
-    sid = request.cookies.get('sid')
+        response = jsonify(error='Prea multe întrebări. Încearcă din nou peste un minut.')
+        response.headers['Retry-After'] = '60'
+        return response, 429
+    sid = None if request.get_json(silent=True).get('reset_session') is True else request.cookies.get('sid')
     new_cookie = False
-    with _sessions_lock:
-        if not sid or sid not in sessions:
+    with _session_lock:
+        if sid not in sessions:
             sid = uuid.uuid4().hex
+            sessions[sid] = Conversation()
             new_cookie = True
-            sessions[sid] = []
-            while len(sessions) > MAX_SESSIONS:
-                sessions.popitem(last=False)
         sessions.move_to_end(sid)
-        history = list(sessions[sid])
-
+        conversation = sessions[sid]
+        while len(sessions) > MAX_SESSIONS:
+            sessions.popitem(last=False)
     try:
-        logger.info(f"Procesare întrebare: {user_query}")  # Processing query
-        response_data = agent.process_query(user_query, history=history)
-
-        with _sessions_lock:
-            sessions[sid] = response_data.get('history', history)
-
-        reply = jsonify({
-            'response': response_data.get('response', ''),
-            'visualization': response_data.get('visualization'),
-            'timestamp': datetime.now().isoformat()
-        })
+        # Serialize a visitor's history read + update, including simultaneous tabs.
+        with conversation.lock:
+            result = snapshot.agent.process_query(query, history=list(conversation.history))
+            conversation.history = result.get('history', conversation.history)[-config.MAX_HISTORY_LENGTH * 2:]
+        response = jsonify(response=result.get('response', ''), visualization=result.get('visualization'),
+                           evidence=result.get('evidence', {}), timestamp=datetime.now(timezone.utc).isoformat(),
+                           data_updated_at=snapshot.updated_at,
+                           data_mode='simulation' if config.ENABLE_SIMULATED_DATA else 'measured')
         if new_cookie:
-            reply.set_cookie('sid', sid, httponly=True, samesite='Lax')
-        return reply
+            response.set_cookie('sid', sid, httponly=True, samesite='Lax', secure=request.is_secure)
+        return response
+    except Exception:
+        logger.exception('Query failed')
+        return jsonify(error='Întrebarea nu a putut fi procesată. Încearcă din nou.'), 500
 
-    except Exception as e:
-        logger.error(f"Eroare la procesarea întrebării: {e}")  # Error processing query
-        return jsonify({'error': 'A apărut o eroare internă. Te rog încearcă din nou.'}), 500
 
-@app.route('/maps/<path:filename>')
-def serve_map(filename):
-    """Serve generated map files from the data directory
-
-    This route allows the web interface to access the generated
-    map HTML files that are stored in the data directory.
-    """
-    try:
-        return send_from_directory(config.DATA_DIR, filename)
-    except Exception as e:
-        logger.error(f"Eroare la servirea hărții {filename}: {e}")  # Error serving map
-        return "Fișierul hărții nu a fost găsit", 404  # Map file not found
-
-@app.route('/update-data', methods=['POST'])
+@app.post('/update-data')
 def update_data():
-    """API endpoint to manually trigger a data update
+    global _last_manual_update, is_updating
+    with _state_lock:
+        now = time.monotonic()
+        if is_updating:
+            return jsonify(message='Actualizarea este deja în curs.'), 409
+        if _last_manual_update and now - _last_manual_update < UPDATE_COOLDOWN:
+            return jsonify(message='Datele au fost actualizate recent. Încearcă peste câteva minute.'), 429
+        if not _load_lock.acquire(blocking=False):
+            return jsonify(message='Actualizarea este deja în curs.'), 409
+        is_updating = True
+        _last_manual_update = now
+    try:
+        threading.Thread(target=load_data, kwargs={'force_update': True, 'reserved': True}, daemon=True).start()
+    except Exception:
+        with _state_lock:
+            is_updating = False
+            _last_manual_update = 0.0
+        _load_lock.release()
+        logger.exception('Unable to start refresh')
+        return jsonify(message='Actualizarea nu a putut porni.'), 500
+    return jsonify(message='Actualizarea a început. Poți continua să folosești datele disponibile.'), 202
 
-    This allows administrators to force a refresh of all data
-    sources without waiting for the scheduled update.
-    """
-    global is_updating, _last_manual_update
 
-    if is_updating:
-        return jsonify({'message': 'Actualizarea datelor este deja în curs'}), 409  # Data update already in progress
-
-    wait = int(UPDATE_COOLDOWN - (time.time() - _last_manual_update))
-    if wait > 0:
-        return jsonify({'message': f'Datele au fost actualizate recent. Încearcă din nou peste {wait} secunde.'}), 429
-    _last_manual_update = time.time()
-
-    # Start update in a thread to not block the response
-    threading.Thread(target=load_data, args=(True,)).start()
-
-    return jsonify({'message': 'Actualizarea datelor a început'})  # Data update started
-
-@app.route('/api/map', methods=['GET'])
+@app.get('/api/map')
 def get_map():
-    """API endpoint to generate different types of maps on demand
-
-    Allows the web interface to request different visualizations
-    based on the map type and data column parameters.
-    """
-    global visualizer, gdf_data
-
-    if visualizer is None or gdf_data is None:
-        return jsonify({'error': 'Datele nu au fost încărcate'}), 503  # Data not loaded
-
-    map_type = request.args.get('type', 'parks')
-    column = request.args.get('column')
-
+    snapshot = _snapshot
+    if snapshot is None:
+        return jsonify(error='Datele se pregătesc.'), 503
+    kind, column = request.args.get('type', 'parks'), request.args.get('column')
+    if kind not in ('parks', 'heatmap') or (kind == 'heatmap' and column not in ('aqi', 'noise_level_db')):
+        return jsonify(error='Tip de hartă sau indicator invalid.'), 400
+    if kind == 'heatmap' and (column not in snapshot.data or not snapshot.data[column].notna().any()):
+        return jsonify(error='Nu există măsurători pentru acest indicator.'), 422
     try:
-        if map_type == 'heatmap' and column in gdf_data.columns:
-            map_obj = visualizer.create_heatmap(column)
-        else:  # default to simplified parks map
-            map_obj = visualizer.create_simplified_map()
+        obj = snapshot.visualizer.create_heatmap(column) if kind == 'heatmap' else snapshot.visualizer.create_simplified_map()
+        path = snapshot.visualizer.save_map(obj, f'map_{uuid.uuid4().hex}.html')
+        return jsonify(map_url=f'/maps/{Path(path).name}')
+    except Exception:
+        logger.exception('Map generation failed')
+        return jsonify(error='Harta nu a putut fi creată.'), 500
 
-        map_path = visualizer.save_map(map_obj, f"{map_type}_{int(time.time())}.html")
-        map_filename = os.path.basename(map_path)
 
-        return jsonify({
-            'map_url': f'/maps/{map_filename}',
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Eroare la crearea hărții: {e}")  # Error creating map
-        return jsonify({'error': 'Harta nu a putut fi creată.'}), 500
+@app.get('/maps/<filename>')
+def serve_map(filename):
+    if Path(filename).suffix.lower() != '.html':
+        return '', 404
+    return send_from_directory(config.MAPS_DIR, filename)
 
-@app.route('/debug-data')
-def debug_data_endpoint():
-    """Debugging endpoint to inspect the loaded data structure
 
-    This endpoint is useful during development and troubleshooting
-    to view the structure and contents of the loaded data.
-    """
-    if gdf_data is None:
-        return jsonify({
-            "status": "Nicio dată încărcată",  # No data loaded
-            "is_updating": is_updating
-        })
+@app.get('/visualizations/<filename>')
+def serve_visualization(filename):
+    if Path(filename).suffix.lower() not in ('.png', '.jpg', '.jpeg'):
+        return '', 404
+    return send_from_directory(Path(config.BASE_DIR) / 'visualizations', filename)
 
-    # Without debug mode only a harmless status summary is shown
-    if not config.DEBUG_MODE:
-        return jsonify({
-            "status": "Date încărcate",  # Data loaded
-            "is_updating": is_updating,
-            "rows": len(gdf_data),
-            "last_update": last_update_time.isoformat() if last_update_time else None
-        })
-
-    try:
-        columns = gdf_data.columns.tolist()
-        sample = {}
-        if len(gdf_data) > 0:
-            for col in columns:
-                try:
-                    sample[col] = str(gdf_data[col].iloc[0])
-                except Exception:
-                    sample[col] = "Eroare la extragerea valorii"  # Error extracting value
-
-        return jsonify({
-            "status": "Date încărcate",  # Data loaded
-            "is_updating": is_updating,
-            "rows": len(gdf_data),
-            "columns": columns,
-            "sample": sample,
-            "last_update": last_update_time.isoformat() if last_update_time else None
-        })
-    except Exception as e:
-        logger.error(f"Eroare debug-data: {e}")
-        return jsonify({"status": "Eroare"}), 500  # Error
-
-def parse_arguments():
-    """Parse command line arguments for application configuration
-
-    Defines and processes all command-line options that control
-    how the application starts and operates.
-    """
-    parser = argparse.ArgumentParser(description="Asistent Date Urbane București - Server Web")  # Bucharest Urban Data Assistant Web Server
-    parser.add_argument(
-        "-p", "--port",
-        type=int,
-        default=int(os.getenv("PORT", 5000)),
-        help="Portul pe care va rula serverul web (implicit: 5000)"
-    )
-    parser.add_argument(
-        "--host",
-        default=config.HOST,
-        help="Adresa pe care va rula serverul web (implicit: 127.0.0.1, doar local)"
-    )
-    parser.add_argument(
-        "-d", "--debug",
-        action="store_true",
-        help="Rulează aplicația Flask în modul debug"  # Run the Flask app in debug mode
-    )
-    parser.add_argument(
-        "-f", "--force-update",
-        action="store_true",
-        help="Forțează actualizarea tuturor surselor de date la pornire, ignorând datele din cache"  # Force update all data sources
-    )
-    return parser.parse_args()
 
 def main():
-    """Main entry point for the web application
-
-    Handles initialization, data loading, thread setup, and
-    starts the Flask web server for the application.
-    """
-    args = parse_arguments()
-
-    print("Inițializare Asistent Date Urbane București - Server Web...")  # Initializing Bucharest Urban Data Assistant Web Server
-
-    # Load data in a separate thread to not block app startup
-    threading.Thread(target=load_data, args=(args.force_update,)).start()
-
-    # Start the periodic data update thread
-    global update_thread
-    update_thread = threading.Thread(target=update_data_periodically, daemon=True)
-    update_thread.start()
-
-    # The Flask debugger lets visitors run code, so never combine it with a public address
-    host = args.host
-    if args.debug and host not in ("127.0.0.1", "localhost"):
-        logger.warning("Modul debug este permis doar local; se folosește 127.0.0.1.")
-        host = "127.0.0.1"
-
-    # Run the Flask app (no reloader: it would start the data loader twice)
+    parser = argparse.ArgumentParser(description='Asistent Date Urbane București')
+    parser.add_argument('--host', default=config.HOST)
+    parser.add_argument('-p', '--port', type=int, default=config.PORT)
+    parser.add_argument('-d', '--debug', action='store_true')
+    parser.add_argument('-f', '--force-update', action='store_true')
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    if args.force_update:
+        # Run through the same startup/refresh path while honoring the explicit flag.
+        global _started
+        _started = True
+        threading.Thread(target=load_data, args=(True,), daemon=True).start()
+        threading.Thread(target=_periodic_refresh, daemon=True).start()
+    create_app()
+    host = '127.0.0.1' if args.debug else args.host
     app.run(host=host, port=args.port, debug=args.debug, use_reloader=False, threaded=True)
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
