@@ -25,6 +25,7 @@ from .recommendations import rank_parks
 from .routing import RouteService
 from . import sectors
 from .forecast import load_forecast
+from .map_view import create_map
 
 import matplotlib
 matplotlib.use('Agg')
@@ -605,7 +606,7 @@ class UrbanDataAgent:
         import folium
         from pathlib import Path
         from uuid import uuid4
-        m = folium.Map(location=[config.BUCHAREST_LAT, config.BUCHAREST_LON], zoom_start=12)
+        m = create_map(location=[config.BUCHAREST_LAT, config.BUCHAREST_LON], zoom_start=12)
         lines = ["Parcuri cu măsurători recente în apropiere. Clasamentul este relativ, nu o garanție a condițiilor locale."]
         evidence = []
         for _, row in ranked.iterrows():
@@ -714,7 +715,7 @@ class UrbanDataAgent:
             from pathlib import Path
             from uuid import uuid4
             coordinates = [point for leg in legs for point in leg['coordinates']]
-            map_obj = folium.Map(location=coordinates[0], zoom_start=13)
+            map_obj = create_map(location=coordinates[0], zoom_start=13)
             for leg in legs:
                 folium.PolyLine(leg['coordinates'], color='#176b50', weight=5).add_to(map_obj)
             for row in selected:

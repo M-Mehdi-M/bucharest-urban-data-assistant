@@ -26,6 +26,7 @@ This workspace also has an ignored, project-local Python runtime prepared during
 ## What changed
 
 - A responsive map-and-chat interface, live readiness status, examples, and expandable evidence details.
+- Interactive maps share an attributed OpenStreetMap basemap and an origin-preserving referrer policy, including generated HTML and tile-layer options. The server uses `strict-origin-when-cross-origin`; `same-origin` would suppress the referrer required by the [OSM tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
 - Data refresh builds a complete replacement snapshot before publishing it. Queries continue using the previous snapshot during refresh or provider failure.
 - Startup can publish reprocessed source caches before attempting network updates. A new installation still requires an initial park download.
 - Source cards report collection progress and distinguish live downloads, usable caches, provider quotas, and unavailable data. `/api/status` includes the same diagnostics and the number of parks with usable air readings.

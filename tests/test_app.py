@@ -84,6 +84,7 @@ def test_private_data_is_not_served_as_maps(client, monkeypatch, tmp_path):
     assert client.get('/maps/private.geojson').status_code == 404
     assert client.get('/maps/../private.geojson').status_code == 404
     assert client.get('/maps/map.html').status_code == 200
+    assert client.get('/maps/map.html').headers['Referrer-Policy'] == 'strict-origin-when-cross-origin'
 
 
 def test_status_and_home_use_actual_sector_counts(client, monkeypatch, parks):

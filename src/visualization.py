@@ -8,6 +8,7 @@ import pandas as pd
 import io
 import base64
 from . import config
+from .map_view import create_map
 import logging
 
 class UrbanVisualizer:
@@ -44,13 +45,13 @@ class UrbanVisualizer:
         data = self.data
         if data is None or len(data) == 0:
             # If no data is available, return an empty map centered on Bucharest
-            m = folium.Map(location=[44.4268, 26.1025], zoom_start=12)
+            m = create_map(location=[44.4268, 26.1025], zoom_start=12)
             return m
 
         logging.info(f"Available columns in data: {data.columns.tolist()}")
 
         # Create base map centered on Bucharest
-        m = folium.Map(location=[44.4268, 26.1025], zoom_start=12)
+        m = create_map(location=[44.4268, 26.1025], zoom_start=12)
 
         # Compute min/max values for color scaling of markers
         aqi_min, aqi_max = None, None
@@ -316,10 +317,10 @@ class UrbanVisualizer:
         """
         if self.data is None or len(self.data) == 0:
             # Create empty map centered on Bucharest if no data
-            m = folium.Map(
+            m = create_map(
                 location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
                 zoom_start=12,
-                tiles='CartoDB positron'
+                tiles='OpenStreetMap'
             )
             folium.Marker(
                 [config.BUCHAREST_LAT, config.BUCHAREST_LON],
@@ -332,10 +333,10 @@ class UrbanVisualizer:
         center_lat = self.data.geometry.y.mean()
         center_lon = self.data.geometry.x.mean()
         
-        m = folium.Map(
+        m = create_map(
             location=[center_lat, center_lon],
             zoom_start=12,
-            tiles='CartoDB positron'
+            tiles='OpenStreetMap'
         )
         
         # Add title to the map
@@ -448,18 +449,18 @@ class UrbanVisualizer:
         """
         if self.data is None or len(self.data) == 0:
             # Create empty map if no data
-            m = folium.Map(
+            m = create_map(
                 location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
                 zoom_start=12,
-                tiles='CartoDB dark_matter'
+                tiles='OpenStreetMap'
             )
             return m
         
         # Create base map with dark background for better heatmap visibility
-        m = folium.Map(
+        m = create_map(
             location=[self.data.geometry.y.mean(), self.data.geometry.x.mean()],
             zoom_start=12,
-            tiles='CartoDB dark_matter'
+            tiles='OpenStreetMap'
         )
         
         # Create heatmap data points with intensities
@@ -505,7 +506,7 @@ class UrbanVisualizer:
         
         # Add title to map
         title_html = f'''
-            <h3 align="center" style="font-size:16px; color:white"><b>{title}</b></h3>
+            <h3 align="center" style="font-size:16px; color:#16342e"><b>{title}</b></h3>
         '''
         m.get_root().html.add_child(folium.Element(title_html))
         
@@ -534,7 +535,7 @@ class UrbanVisualizer:
         """
         if 'error' in route_data:
             # Create an error map if route calculation failed
-            m = folium.Map(
+            m = create_map(
                 location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
                 zoom_start=12
             )
@@ -547,7 +548,7 @@ class UrbanVisualizer:
             
         if 'route_gdf' not in route_data or self.data is None:
             # Missing required data
-            m = folium.Map(
+            m = create_map(
                 location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
                 zoom_start=12
             )
@@ -564,7 +565,7 @@ class UrbanVisualizer:
         
         if len(start_park) == 0 or len(end_park) == 0:
             # Parks not found in our dataset
-            m = folium.Map(
+            m = create_map(
                 location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
                 zoom_start=12
             )
@@ -582,10 +583,10 @@ class UrbanVisualizer:
         center_lon = (bounds[0] + bounds[2]) / 2
         
         # Create map centered on the route
-        m = folium.Map(
+        m = create_map(
             location=[center_lat, center_lon],
             zoom_start=14,
-            tiles='CartoDB positron'
+            tiles='OpenStreetMap'
         )
         
         # Add the route as a blue line
@@ -655,7 +656,7 @@ class UrbanVisualizer:
         """
         if optimal_locations_gdf is None or len(optimal_locations_gdf) == 0:
             # Create empty map if no data
-            m = folium.Map(
+            m = create_map(
                 location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
                 zoom_start=12
             )
@@ -667,7 +668,7 @@ class UrbanVisualizer:
             return m
             
         # Create base map centered on Bucharest
-        m = folium.Map(
+        m = create_map(
             location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
             zoom_start=12
         )
@@ -766,10 +767,10 @@ class UrbanVisualizer:
             folium.Map: Interactive map with accessibility visualization
         """
         # Create base map centered on Bucharest
-        m = folium.Map(
+        m = create_map(
             location=[config.BUCHAREST_LAT, config.BUCHAREST_LON],
             zoom_start=12,
-            tiles='CartoDB positron'
+            tiles='OpenStreetMap'
         )
         
         # Add info panel with accessibility statistics

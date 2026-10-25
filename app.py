@@ -14,6 +14,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 
 from src import config
 from src import source_health
+from src.map_view import REFERRER_POLICY
 from src.agent import UrbanDataAgent
 from src.contracts import validate_query
 from src.data_collection import collect_all_data
@@ -157,7 +158,8 @@ def rate_limited(ip):
 def security_headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    response.headers['Referrer-Policy'] = 'same-origin'
+    # Tile requests must carry the app's origin, without exposing paths or queries.
+    response.headers['Referrer-Policy'] = REFERRER_POLICY
     if request.path.startswith('/api/'):
         response.headers['Cache-Control'] = 'no-store'
     return response

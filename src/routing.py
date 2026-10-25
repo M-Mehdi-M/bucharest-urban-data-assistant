@@ -10,6 +10,7 @@ from pyproj import Geod
 
 from . import config
 from .contracts import normalize_park_name
+from .map_view import create_map
 
 
 class RouteService:
@@ -72,7 +73,7 @@ class RouteService:
             else:
                 coords = [(graph.nodes[n]["x"], graph.nodes[n]["y"]) for n in (u, v)]
             coordinates.extend((lat, lon) for lon, lat in coords)
-        map_obj = folium.Map(location=coordinates[0], zoom_start=13)
+        map_obj = create_map(location=coordinates[0], zoom_start=13)
         folium.PolyLine(coordinates, color="#166854", weight=5).add_to(map_obj)
         for point, park in ((start, origin), (end, destination)):
             folium.Marker([point.y, point.x], tooltip=escape(str(park["name"]))).add_to(map_obj)
