@@ -1,4 +1,4 @@
-﻿# Python 3.11–3.13. Resolved versions: requirements.lock.txt.
+# Python 3.11-3.13: application and verification dependencies in one file.
 pandas>=2.2,<3
 numpy>=1.26,<3
 matplotlib>=3.9,<4
@@ -18,3 +18,7 @@ flask>=3.1,<4
 python-dotenv>=1.0,<2
 waitress>=3.0,<4
 tzdata>=2025.1
+
+# Tests and static checks (used by GitHub Actions and local development).
+pytest>=8,<10
+ruff>=0.12,<1

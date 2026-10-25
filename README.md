@@ -87,7 +87,7 @@ Queries are limited to 500 characters and 20 requests/minute per IP. Request bod
 ## Verification
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.txt
 python -m pytest -q
 python -m ruff check src app.py tests --select F821,F822,F823,E9
 node --check static/app.js
@@ -95,7 +95,7 @@ node --check static/app.js
 
 Tests use synthetic geospatial fixtures and mock provider/model access. They do not consume API quota. Coverage includes malformed JSON, tool argument bounds, conversation isolation/reset, snapshot failure, stale/missing sensor data, nearest-join ties, polygon retention, metric coverage, travel-mode selection, parallel routing edges, and unavailable networks.
 
-`requirements.txt` declares bounded application dependencies. `requirements.lock.txt` records the resolved application **and development** environment verified on Windows/Python 3.12; other Python versions may need the bounded requirements to resolve compatible wheels. CI checks Python 3.11, 3.12, and 3.13 without external service calls.
+`requirements.txt` is the single dependency file for the application, tests, and static checks. Both workflows install it. CI checks Python 3.11, 3.12, and 3.13 without external service calls.
 
 ## Serving beyond development
 
@@ -113,7 +113,11 @@ Or, using the project-local runtime:
 
 Use one application process: snapshots, plotting coordination, refresh scheduling, sessions, and quotas are process-local. Multiple processes require a shared task/state design. Plotting remains serialized to protect Matplotlib state; this is a deliberate remaining concurrency limit.
 
-The ngrok workflow is **manual only** and uses Waitress. Normal pushes run checks rather than opening public tunnels. The application has no account system; keep it local or use authenticated hosting for private/public deployments. Generated artifacts are not private per-user documents.
+The ngrok demo runs on pushes to `main` and through **Actions > Run Flask + Ngrok (demo) > Run workflow**. It uses Waitress, prints the HTTPS URL in the job log and job summary, and monitors both processes for up to 120 minutes. The job has a 150-minute timeout to allow setup and shutdown. A newer demo run cancels the previous one.
+
+Set repository Actions secrets `NGROK_AUTH_TOKEN`, `GEMINI_API_KEY`, and `AIRLY_API_KEY`. Manual runs can choose a duration from 1 to 120 minutes. Logs are uploaded as a workflow artifact. Geographic/observation caches are restored between runs; a labeled bundled park snapshot lets a new runner show a map during Overpass outages.
+
+The application has no account system; keep it local or use authenticated hosting for private/public deployments. Generated artifacts are not private per-user documents.
 
 ## Current limits
 
